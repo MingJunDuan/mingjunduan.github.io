@@ -20,16 +20,23 @@ layout: default
 </div>
 
 <div class="pagination">
-  <div class="flex-container">
-    <div>
-      {% if paginator.previous_page %}
-        <a href="{{ paginator.previous_page_path | prepend: site.baseurl }}"><i class="fas fa-angle-left"></i>&nbspNewer</a>
+  {% if paginator.total_pages > 1 %}
+    {% if paginator.previous_page %}
+      <a href="{{ paginator.previous_page_path | prepend: site.baseurl }}" class="pagination-item newer">← 较新</a>
+    {% endif %}
+
+    {% for page in (1..paginator.total_pages) %}
+      {% if page == paginator.page %}
+        <span class="pagination-item current">{{ page }}</span>
+      {% elsif page == 1 %}
+        <a href="{{ '/' | prepend: site.baseurl }}" class="pagination-item">{{ page }}</a>
+      {% else %}
+        <a href="{{ site.paginate_path | replace: ':num', page | prepend: site.baseurl }}" class="pagination-item">{{ page }}</a>
       {% endif %}
-    </div>
-    <div>
-      {% if paginator.next_page %}
-        <a href="{{ paginator.next_page_path | prepend: site.baseurl }}">Older&nbsp<i class="fas fa-angle-right"></i></a>
-      {% endif %}
-    </div>
-  </div>
+    {% endfor %}
+
+    {% if paginator.next_page %}
+      <a href="{{ paginator.next_page_path | prepend: site.baseurl }}" class="pagination-item older">较旧 →</a>
+    {% endif %}
+  {% endif %}
 </div>
