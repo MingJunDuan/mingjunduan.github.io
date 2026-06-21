@@ -32,6 +32,16 @@ related_posts_section:
   max_count:        5
   min_common_tags:  2
 
+# Giscus comments
+giscus:
+  repo: MingJunDuan/mingjunduan.github.io
+  repo_id: R_kgDOKq4gsw
+  category_id: DIC_kwDOKq4gs84C_lne
+  mapping: pathname
+  reactions_enabled: 1
+  theme: preferred_color_scheme
+  lang: zh-CN
+
 # Links to social media
 social:
   email: dmj1161859184@126.com
