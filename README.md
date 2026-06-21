@@ -5,7 +5,7 @@
 ## 本地启动
 
 ```bash
-cd /opt/code/idea/workspace-github/mingjunduan.github.io
+cd mingjunduan.github.io
 bundle exec jekyll serve
 ```
 
