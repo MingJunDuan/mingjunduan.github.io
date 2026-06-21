@@ -4,12 +4,12 @@
   {% include head.html %}
 
   <body>
-    <nav class="nav">
-      <div class="nav-container">
-        <a href="{{ site.baseurl }}/">
-          <h2 class="nav-title">{{ site.title }}</h2>
-        </a>
-        <ul class="nav-social-icons">
+    <header class="topbar">
+      <div class="topbar-title-row">
+        <a href="{{ site.baseurl }}/" class="topbar-title">{{ site.title }}</a>
+      </div>
+      <div class="topbar-sub-row">
+        <ul class="topbar-social">
           {% if site.social.email %}
             <li><a target="_blank" href="mailto:{{ site.social.email }}"><i class="fas fa-envelope"></i></a></li>
           {% endif %}
@@ -19,21 +19,37 @@
           {% if site.social.twitter %}
             <li><a target="_blank" href="{{ site.social.twitter }}"><i class="fab fa-twitter"></i></a></li>
           {% endif %}
-          {% if site.social.linkedin %}
-            <li><a target="_blank" href="{{ site.social.linkedin }}"><i class="fab fa-linkedin-in"></i></a></li>
-          {% endif %}
         </ul>
+        <span class="topbar-uv" id="busuanzi_container_site_uv">
+          全站访问量 <span id="busuanzi_value_site_uv"></span> 次
+        </span>
       </div>
-    </nav>
+    </header>
 
-    <main>
-      {{ content }}
-    </main>
+    <div class="wrapper">
+      <aside class="sidebar">
+        <ul class="post-list">
+          {% for post in site.posts %}
+            <li class="post-list-item">
+              <a href="{{ post.url | prepend: site.baseurl }}" class="post-list-link" title="{{ post.title }}">
+                {{ post.title }}
+              </a>
+            </li>
+          {% endfor %}
+        </ul>
+      </aside>
 
-    <footer>
-      <span>
-        &copy; <time datetime="{{ site.time }}">{{ site.time | date: '%Y' }}</time> {{ site.author.name }}.
-      </span>
-    </footer>
+      <div class="content-area">
+        <main>
+          {{ content }}
+        </main>
+
+        <footer>
+          <span>
+            &copy; <time datetime="{{ site.time }}">{{ site.time | date: '%Y' }}</time> {{ site.author.name }}.
+          </span>
+        </footer>
+      </div>
+    </div>
   </body>
 </html>
