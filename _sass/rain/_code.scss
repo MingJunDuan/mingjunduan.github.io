@@ -1,3 +1,39 @@
+// Code block wrapper
+.code-block {
+  position: relative;
+  margin: 0 0 1rem;
+}
+
+.copy-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid $grey-2;
+  border-radius: 4px;
+  background: #fff;
+  color: $default-tint;
+  font-family: $sans-serif;
+  font-size: 0.75rem;
+  cursor: pointer;
+  opacity: 0;
+  @include transition(all .15s ease-out);
+
+  &:hover {
+    border-color: $default-tint;
+    color: $default-color;
+  }
+
+  &.copied {
+    border-color: #27ae60;
+    color: #27ae60;
+  }
+}
+
+.code-block:hover .copy-btn {
+  opacity: 1;
+}
+
 pre,
 code {
   font-family: $monospaced;

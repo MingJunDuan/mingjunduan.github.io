@@ -1,0 +1,22 @@
+.back-to-top {
+  display: none;
+  position: fixed;
+  bottom: 2rem;
+  right: 2rem;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 50%;
+  background-color: $default-shade;
+  color: #fff;
+  font-size: 1.2rem;
+  cursor: pointer;
+  z-index: 999;
+  opacity: .7;
+  @include transition(all .2s ease-out);
+
+  &:hover {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
