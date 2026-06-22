@@ -23,6 +23,7 @@ bundle exec jekyll serve
 | 不蒜子统计 | 顶栏显示全站访问量，文章底部显示每篇阅读量 |
 | 代码块复制 | 鼠标移入代码块显示复制按钮，点击复制到剪贴板 |
 | 回到顶部 | 滚动超过一屏后右下角出现 ↑ 按钮，点击平滑回顶部 |
+| 图片自动压缩 | ImgBot 自动压缩 `images/` 目录下的图片，Actions 自动合并 PR，全程零操作 |
 
 ---
 
@@ -88,5 +89,6 @@ git push origin main
 | **分页** | `jekyll-paginate` 按每页 5 篇自动计算总页数 | 无需操作 |
 | **评论** | Giscus 按 URL pathname 自动匹配 Discussion，新文章首次有人评论时自动创建 | 无需操作 |
 | **阅读量** | 不蒜子按页面 URL 独立计数，新页面首次访问时自动开始统计 | 无需操作 |
+| **图片压缩** | ImgBot 检测 push 的图片，自动提 PR 压缩；GitHub Actions 检测到 ImgBot PR 后自动 squash merge | 无需操作 |
 
 Push 后 GitHub Pages 自动构建，1-2 分钟后在 https://mingjunduan.github.io 即可看到新文章。
