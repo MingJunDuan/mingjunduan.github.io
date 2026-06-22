@@ -14,6 +14,7 @@
 | 评论 | Giscus (GitHub Discussions) |
 | 统计 | 不蒜子 (Busuanzi) |
 | 分页 | jekyll-paginate (每页 5 篇) |
+| 图片压缩 | ImgBot (自动压缩) + GitHub Actions (自动合并 PR) |
 | 部署 | GitHub Pages (push main 自动构建) |
 
 ## 目录结构
@@ -45,6 +46,8 @@
 ├── index.html            # 首页入口
 ├── rain.gemspec          # 主题 gem 定义（Rain 0.1.0）
 ├── Gemfile               # Ruby 依赖（源 ruby-china）
+├── .github/workflows/
+│   └── auto-merge-imgbot.yml  # ImgBot PR 自动合并
 └── README.md             # 项目说明 + 新博客操作步骤
 ```
 
@@ -102,6 +105,11 @@ home.html  →  default.html  →  head.html
 - `home.html` 用 `paginator.posts` 遍历当前页文章
 - 底部显示全部页码 + 上一页/下一页链接
 
+### 图片压缩 & 自动合并
+- 安装 ImgBot 后，push 图片到 `images/` 目录时自动提 PR 压缩
+- `.github/workflows/auto-merge-imgbot.yml` 检测到 PR 作者为 `imgbot` 时，自动 `gh pr merge --auto --squash`
+- 全程零操作：push 图片 → ImgBot 提 PR → Actions 自动合并
+
 ## 日常操作
 
 ### 添加新博客
@@ -128,20 +136,9 @@ bundle exec jekyll serve
 # → http://localhost:4000
 ```
 
-## Git 状态（截至 2026-06-21）
+## Git 状态（截至 2026-06-22）
 
-本地领先 origin/main 7 个 commit：
-```
-25e6128 docs: 补充代码复制和回到顶部功能
-bdc701d feat: 回到顶部按钮 + 代码块一键复制
-450f057 docs: 补充功能介绍和新博客操作步骤
-35c7da0 feat: 侧边栏目录、双行顶栏、不蒜子阅读量统计
-1584ace feat: 为分页添加页码显示，优化可见性
-6d2aeb9 fix: 修正 Giscus category Announcements → General
-53cadce feat: 接入 Giscus 评论功能
-```
-
-`git push origin main` 即可推送所有。
+本地领先 origin/main 10 个 commit（含 ImgBot、CLAUDE.md 等），`git push origin main` 推送全部。
 
 ## 注意事项
 
@@ -153,3 +150,4 @@ bdc701d feat: 回到顶部按钮 + 代码块一键复制
 - **Permalink**：`/:year-:month-:day/:title`，如 `/2026-06-21/文章标题`
 - **jekyll-paginate**：官方插件，GitHub Pages 原生支持，无需额外配置
 - **Rain 主题**：此主题是这个项目的私有实现，不是发布的 Ruby gem，所有源码在 `_sass/` 和 `_layouts/` 中直接修改
+- **Git push 报错**：如果 push 时报 `workflow scope` 错误，说明 Personal Access Token 缺少 `workflow` 权限。到 https://github.com/settings/tokens 给 token 勾选 `workflow` scope 即可
