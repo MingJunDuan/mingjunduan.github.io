@@ -25,6 +25,7 @@ plugins:
 
 # Permalinks
 permalink:      /:year-:month-:day/:title
+future:         true
 paginate:       5
 
 # Related posts settings
