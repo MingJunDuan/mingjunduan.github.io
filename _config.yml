@@ -11,6 +11,12 @@ author:
 
 # Build settings
 markdown:       kramdown
+exclude:
+  - CLAUDE.md
+  - Gemfile
+  - Gemfile.lock
+  - README.md
+  - rain.gemspec
 
 # Assets
 sass:
