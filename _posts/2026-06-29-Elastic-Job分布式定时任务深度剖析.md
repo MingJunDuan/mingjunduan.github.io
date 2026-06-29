@@ -226,6 +226,167 @@ new ScheduleJobBootstrap(regCenter, new MySimpleJob(), jobConfig).schedule();
 
 几行代码就完成了一个分布式定时任务的搭建。背后是 ZK 节点树的全自动管理。
 
+### 3.5 单节点执行 vs 多节点执行 —— ZK 数据结构的差异
+
+很多开发者以为"单节点执行"就是只有一个实例注册到 ZK。实际上并非如此——差异不在 `instances/`，而在 `sharding/` 子树。
+
+#### 场景设定
+
+```
+3 个实例：节点 A (IP 101)、节点 B (IP 102)、节点 C (IP 103)
+作业名：myJob，命名空间：elasticjob
+```
+
+#### 单节点执行（shardingTotalCount = 1）
+
+```
+/${namespace}/myJob/
+│
+├── config
+│   └── {"cron":"0/5 * * * * ?", "shardingTotalCount":1, ...}
+│
+├── servers/
+│   ├── 192.168.1.101
+│   ├── 192.168.1.102
+│   └── 192.168.1.103
+│
+├── instances/                         ← 3 个实例都注册了！
+│   ├── 192.168.1.101@-@8372
+│   ├── 192.168.1.102@-@9231
+│   └── 192.168.1.103@-@5721
+│
+├── sharding/
+│   └── 0/                             ← 只有一个分片
+│       ├── instance → "192.168.1.102@-@9231"  ← 只分给 B
+│       ├── running  → "192.168.1.102@-@9231"  ← 只有 B 在执行
+│       ├── misfire
+│       └── disabled
+│
+├── leader/                            ← 与多节点完全相同
+│   ├── election/...
+│   ├── sharding/...
+│   └── failover/...
+│
+└── guarantee/...
+```
+
+执行时刻：
+
+```
+10:00:00 Cron 触发
+  节点 A → 查 /sharding/0/instance = "B@9231" ≠ 我  → skip
+  节点 B → 查 /sharding/0/instance = "B@9231" = 我  → 执行!
+  节点 C → 查 /sharding/0/instance = "B@9231" ≠ 我  → skip
+```
+
+**关键**：3 个实例都在 ZK 注册，3 个 Quartz 都触发，但只有 1 个真正执行。任意一个宕机，分片可以 failover 到另一个实例——这就是"弹性"。
+
+#### 多节点执行（shardingTotalCount = 3）
+
+```
+/${namespace}/myJob/
+│
+├── config
+│   └── {"cron":"0/5 * * * * ?", "shardingTotalCount":3,
+│         "shardingItemParameters":"0=Beijing,1=Shanghai,2=Guangzhou", ...}
+│
+├── instances/                         ← 完全相同！
+│   ├── 192.168.1.101@-@8372
+│   ├── 192.168.1.102@-@9231
+│   └── 192.168.1.103@-@5721
+│
+├── sharding/                          ← 这里有 3 个分片子目录
+│   ├── 0/
+│   │   ├── instance → "192.168.1.101@-@8372"  ← 分给 A
+│   │   ├── running  → "192.168.1.101@-@8372"  ← A 在执行
+│   │   ├── misfire
+│   │   └── disabled
+│   ├── 1/
+│   │   ├── instance → "192.168.1.102@-@9231"  ← 分给 B
+│   │   ├── running  → "192.168.1.102@-@9231"  ← B 在执行
+│   │   ├── misfire
+│   │   └── disabled
+│   └── 2/
+│       ├── instance → "192.168.1.103@-@5721"  ← 分给 C
+│       ├── running  → "192.168.1.103@-@5721"  ← C 在执行
+│       ├── misfire
+│       └── disabled
+│
+├── leader/                            ← 完全相同
+│   ├── election/...
+│   ├── sharding/...
+│   └── failover/...
+│
+└── guarantee/                         ← 子节点数量不同
+    ├── started/
+    │   ├── 0 → 101
+    │   ├── 1 → 102
+    │   └── 2 → 103
+    └── completed/
+        ├── 0 → 101
+        ├── 1 → 102
+        └── 2 → 103
+```
+
+#### 差异对照一览
+
+```
+ZK 路径                    shardingTotalCount=1    shardingTotalCount=3
+─────────────────────────  ─────────────────────   ─────────────────────
+config                     相同（仅 totalCount 不同）  相同
+servers/*                  3 个持久节点             3 个持久节点（相同）
+instances/*                3 个临时节点             3 个临时节点（相同）
+leader/election/*          相同                    相同
+leader/sharding/*          相同                    相同
+leader/failover/*          相同                    相同
+
+sharding/                  只有 0/                  有 0/、1/、2/
+  {item}/instance          1 个                    3 个，各自指向不同实例
+  {item}/running           最多 1 个同时存在         最多 3 个同时存在
+  {item}/misfire           1 个                     3 个
+
+guarantee/started/         最多 1 个子节点           最多 3 个子节点
+guarantee/completed/       最多 1 个子节点           最多 3 个子节点
+```
+
+#### 特殊情况：实例数 > 分片数
+
+```
+shardingTotalCount = 2，实例 = 3 (A, B, C)
+
+平均分配结果：
+  A: 分片 0
+  B: 分片 1
+  C: 无分片
+
+ZK 上的 sharding/:
+  sharding/0/instance → A@8372
+  sharding/1/instance → B@9231
+
+执行时：
+  节点 A → 执行分片 0 ✓
+  节点 B → 执行分片 1 ✓
+  节点 C → instances 里有它，但 sharding/ 下没有它的分片 → skip
+```
+
+核心认知：
+
+```
+┌────────────────────────────────────────────────────────┐
+│                                                       │
+│  instances/ 反映"谁在线"                                │
+│  sharding/  反映"谁执行什么"                             │
+│                                                       │
+│  两者是独立的。在线不一定有分片，有分片一定在线。          │
+│                                                       │
+│  单节点执行 = sharding/ 下只有 1 个子目录                 │
+│  多节点执行 = sharding/ 下有 N 个子目录                   │
+│                                                       │
+│  其他 ZK 路径（instances、leader、servers）完全一样。      │
+│  分片数 ≠ 实例数，两者设计上就解耦。                       │
+└────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 四、主节点选举 —— 谁来做全局决策
@@ -582,6 +743,315 @@ Elastic-Job 处理:
 Misfire 配置:
   misfire: true   → 错过触发的任务会被补偿执行
   misfire: false  → 错过就错过了，等下一次正常触发
+```
+
+### 6.5 Cron 表达式深度解析 —— 四个常见追问
+
+#### 6.5.1 Cron 是谁控制的？每个节点各自执行吗？
+
+**答案：每个节点有自己的 Quartz 实例，各自独立触发，互不通信。**
+
+```
+┌──────────────────────────────────────────────────┐
+│          常见的误解："主节点触发然后分发"            │
+│                                                  │
+│  ✗ 错误理解：                                     │
+│    主节点 Quartz 触发 → 通知 A 执行分片 0           │
+│                      → 通知 B 执行分片 1           │
+│                                                  │
+│  ✓ 实际机制：                                     │
+│    节点 A Quartz 触发 → 查 ZK → "我的分片是 0" → 执行│
+│    节点 B Quartz 触发 → 查 ZK → "我的分片是 1" → 执行│
+│    节点 C Quartz 触发 → 查 ZK → "我没有分片"   → 跳过│
+│                                                  │
+│    三个 Quartz 同时响、各自判、互不依赖              │
+└──────────────────────────────────────────────────┘
+```
+
+Cron 表达式的流转路径：
+
+```
+开发者配置 → 写入 ZK /config（持久节点）→ 每个节点启动时读 ZK → 设置本地 Quartz
+```
+
+所以 Cron 表达式的控制链是：**你配置 → ZK 存储 → 节点自取 → Quartz 自调**。没有"中心调度器"。
+
+#### 6.5.2 后启动的实例会晚于先启动的实例吗？
+
+**会，但仅限于第一个周期。之后完全同步。**
+
+```
+场景：Cron = "0/5 * * * * ?"（在 :00, :05, :10, :15... 触发）
+
+节点 A 启动于 10:00:00
+  10:00:00 → 触发 ✓
+  10:05:00 → 触发 ✓
+
+节点 B 启动于 10:02:00
+  10:00:00 → 已过时，不触发（或标记 misfire）
+  10:05:00 → 触发 ✓（跟 A 同时）
+```
+
+关键认知：Quartz 的 Cron 是基于**绝对壁钟时间**，不是"启动后每 5 分钟"。`0/5 * * * * ?` 的含义是"在分钟数为 0、5、10、15… 的时间点触发"，不是"启动后经过 5 分钟触发"。只要两个节点的时钟同步（NTP），它们会在**同一时刻**触发。
+
+#### 6.5.3 Cron 是什么时候写入 ZK 的？每个实例都会写吗？
+
+**第一个实例写入，后续实例只读不写。**
+
+```java
+// 源码关键路径：SchedulerFacade.registerStartUpInfo()
+// → ConfigService.setUpConfiguration()
+public void setUpConfiguration(LiteJobConfiguration liteJobConfig) {
+    if (jobNodeStorage.isJobNodeExisted(ConfigurationNode.ROOT)) {
+        // ZK 上已存在 → 仅校验，不覆盖
+        LiteJobConfiguration existing = LiteJobConfigurationGsonFactory.fromJson(
+            jobNodeStorage.getJobNodeData(ConfigurationNode.ROOT));
+        if (!existing.equals(liteJobConfig)) {
+            log.warn("Job configuration on ZK is different from local, using ZK's.");
+        }
+        return;  // 直接返回，不写入
+    }
+    // ZK 上不存在 → 写入（通常是第一个实例执行）
+    jobNodeStorage.replaceJobNode(ConfigurationNode.ROOT, 
+        LiteJobConfigurationGsonFactory.toJson(liteJobConfig));
+}
+```
+
+```
+时序：
+  节点 A 启动 (10:00:00)
+      ├─ 查 ZK /config → 不存在
+      └─ 写入 /config = {"cron":"0/5 * * * * ?", ...}
+      
+  节点 B 启动 (10:02:00)
+      ├─ 查 ZK /config → 已存在 ✓
+      ├─ 比较本地 cron 与 ZK cron → 一致 → 跳过写入
+      └─ 读 ZK /config → 设置本地 Quartz
+
+  节点 C 启动 (10:03:00)
+      └─ 同上，只读不写
+```
+
+关键结论：**`/config` 是持久节点，写一次，永久存在。** 如果启动时发现本地 cron 与 ZK 不一致，以 **ZK 为准**（并打印警告日志）。
+
+#### 6.5.4 后台修改 Cron 表达式，怎么生效的？
+
+**ZK Watcher 通知 → 每个实例本地 reschedule Quartz。**
+
+```
+完整链路：
+
+  [管理后台] 修改 cron: "0/5" → "0/10"
+      │
+      ▼
+  [ZooKeeper] /config 节点数据变更
+      │
+      ├──── Watcher 触发（NodeCache 感知）────┐
+      │                                       │
+      ▼                                       ▼
+  [节点 A]                               [节点 B]
+      │                                       │
+      ▼                                       ▼
+  比较新旧 cron:                        比较新旧 cron:
+  "0/5" ≠ "0/10"                       "0/5" ≠ "0/10"
+      │                                       │
+      ▼                                       ▼
+  Quartz 重新调度:                      Quartz 重新调度:
+  scheduler.rescheduleJob(             scheduler.rescheduleJob(
+    oldTrigger, newTrigger)              oldTrigger, newTrigger)
+      │                                       │
+      ▼                                       ▼
+  下次按新 cron 触发:                   下次按新 cron 触发:
+  10:10 → 10:20 → 10:30              10:10 → 10:20 → 10:30
+```
+
+时效性分析：
+
+```
+假设当前时间 10:08，修改 cron:
+
+  旧 cron: "0/5 * * * * ?"  → 下次触发 10:10
+  新 cron: "0/10 * * * * ?" → 下次触发 10:10
+  
+  → cron 变化但下次触发恰好重合（10:10），延迟约 2 分钟
+
+  旧 cron: "0/5 * * * * ?"  → 下次触发 10:10
+  新 cron: "0/7 * * * * ?"  → 下次触发 10:14
+  
+  → 延迟约 6 分钟，期间不会执行
+
+关键细节：
+  - 正在执行中的任务不会被中断，新 Cron 只影响下一次触发
+  - 如果分片总数也变了，会同时标记 leader/sharding/necessary
+```
+
+#### 6.5.5 后台手动触发定时任务，是怎么实现的？
+
+**写一个触发标记到 ZK，每个实例 Watcher 感知后立即调用 `triggerJob()`。**
+
+```
+完整链路：
+
+  [管理后台] 点击 "立即执行"
+      │
+      ▼
+  [ZooKeeper] 写入临时节点: /namespace/myJob/trigger
+      │
+      ├──── Watcher 触发 ────┐
+      │                      │
+      ▼                      ▼
+  [节点 A]              [节点 B]              [节点 C]
+      │                      │                      │
+      ▼                      ▼                      ▼
+  查 ZK 分片表:          查 ZK 分片表:          查 ZK 分片表:
+  我的分片 = [0]         我的分片 = [1]         我的分片 = [2]
+      │                      │                      │
+      ▼                      ▼                      ▼
+  triggerJob()           triggerJob()           triggerJob()
+  立即执行 分片 0!       立即执行 分片 1!       立即执行 分片 2!
+  (不等 Cron)            (不等 Cron)            (不等 Cron)
+```
+
+跟 Cron 触发的区别只有一个：Cron 是 Quartz 定时器到点自动调用，手动触发是 ZK Watcher 收到信号后手动调用 `triggerJob()`。**执行逻辑完全一样**（都要查分片表，都只执行自己的分片）。
+
+---
+
+### 6.6 缓存机制与 ZK 压力分析 —— Cron 触发会"打爆"ZK 吗？
+
+如果每次 Cron 触发都要去 ZK 读一堆数据，高频任务确实能把 ZK 打爆。Elastic-Job 的设计对此有充分考虑：**用多层本地缓存 + Curator 缓存机制，将 ZK 读取降到零，只保留必不可少的写入。**
+
+#### 6.6.1 每次 Cron 触发，到底读了什么？
+
+答案：**几乎全是本地内存读取，不访问 ZK。**
+
+```
+Cron 触发一次，ZK 操作分解：
+
+  ┌────────────────────────────────────────────────────────┐
+  │ 操作                  是否访问 ZK        频率/分片       │
+  ├────────────────────────────────────────────────────────┤
+  │ 读取分片分配表          否 (TreeCache 缓存)   0          │
+  │ 读取 config            否 (NodeCache 缓存)    0          │
+  │ 检查 necessary 标记    否 (NodeCache 缓存)    0          │
+  │ 创建 running 临时节点   是 (必须! 分布式执行锁) 1 次写    │
+  │ 删除 running 临时节点   是 (必须! 执行完成)    1 次删    │
+  └────────────────────────────────────────────────────────┘
+```
+
+**只有 running 节点的创建和删除需要访问 ZK，这是分布式执行锁，不能用任何缓存替代。** 其他所有读操作都被 Curator 的 TreeCache / NodeCache 拦截，走本地内存。
+
+#### 6.6.2 缓存体系全景
+
+```
+                     ┌──────────────────────────┐
+                     │     ZooKeeper 集群        │
+                     └────┬──────┬──────┬───────┘
+                          │      │      │
+              ┌───────────┼──────┼──────┼───────────┐
+              │           │      │      │           │
+              ▼           ▼      ▼      ▼           ▼
+       ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+       │ 节点 A    │ │ 节点 B    │ │ 节点 C    │ │ 节点 D    │
+       ├──────────┤ ├──────────┤ ├──────────┤ ├──────────┤
+       │ TreeCache│ │ TreeCache│ │ TreeCache│ │ TreeCache│
+       │ /sharding│ │ /sharding│ │ /sharding│ │ /sharding│
+       │ 全量缓存  │ │ 全量缓存  │ │ 全量缓存  │ │ 全量缓存  │
+       ├──────────┤ ├──────────┤ ├──────────┤ ├──────────┤
+       │NodeCache │ │NodeCache │ │NodeCache │ │NodeCache │
+       │ /config  │ │ /config  │ │ /config  │ │ /config  │
+       ├──────────┤ ├──────────┤ ├──────────┤ ├──────────┤
+       │本地变量   │ │本地变量   │ │本地变量   │ │本地变量   │
+       │ myItems  │ │ myItems  │ │ myItems  │ │ myItems  │
+       │ [0,1]    │ │ [2,3]    │ │ [4,5]    │ │ [6,7]    │
+       └──────────┘ └──────────┘ └──────────┘ └──────────┘
+       
+数据流：
+  读分片分配   → TreeCache (内存) → 不访问 ZK
+  读配置       → NodeCache (内存) → 不访问 ZK
+  创建 running → 必须访问 ZK (执行锁，不能缓存)
+  
+数据变更时：
+  ZK /config 变化  → Watcher 推送 → NodeCache 更新 → 本地重新调度 Quartz
+  ZK /sharding 变化 → Watcher 推送 → TreeCache 更新 → myItems 重新计算
+```
+
+#### 6.6.3 TreeCache 原理 —— 关键优化
+
+```java
+// 节点启动时，TreeCache 把 /sharding/ 子树全量加载到本地内存
+TreeCache treeCache = new TreeCache(client, "/namespace/myJob/sharding");
+treeCache.start();
+
+// Watcher 持续监听 ZK 变更，自动增量更新本地缓存
+// 当 Cron 触发时：
+// getLocalShardingItems() → 直接读 TreeCache → 纯内存操作，零网络调用
+List<Integer> myItems = cachedShardingItems.getInstanceItems(instanceId);
+```
+
+这就是 Curator `TreeCache` 的价值：**启动时一次全量拉取 + Watcher 持续增量同步**。之后的所有读取都是内存操作。它解决了[前文 ZK Watcher 分析](./)中"每次触发需要重新注册 Watcher"的问题——Curator 在底层自动处理了 Watcher 的重新注册。
+
+#### 6.6.4 running 节点会给 ZK 造成压力吗？
+
+算一笔账：
+
+```
+假设场景：10 个作业，每个 3 个分片，Cron = 每 5 秒
+
+每秒 ZK 写入量：
+  每次触发：3 个 running 创建 + 3 个 running 删除 = 6 次写
+  每分钟：6 × (60/5) = 72 次写
+  每秒：72 / 60 = 1.2 次写
+
+ZK 的写能力：
+  单节点 ZK：~10,000-20,000 TPS（顺序写入 ZAB 日志）
+  3 节点 ZK 集群：~5,000-10,000 TPS（受限于 ZAB 协议广播到 Follower）
+
+结论：1.2 TPS vs 5,000+ TPS → 不到 0.03%，完全可以忽略
+```
+
+**极端场景推演**：
+
+```
+场景：100 个作业，每个 10 个分片，Cron = 每秒 1 次（这本身就不合理）
+
+每秒 running 写 = 100 × 10 × 2 = 2,000 次/秒
+2,000 / 5,000 = 40% 的 ZK 写容量 → 开始有压力
+
+但现实是：
+  - 不会有 100 个作业都每秒执行（Cron 精度通常在分钟级）
+  - running 节点分散在不同路径 /{namespace}/{jobName}/sharding/{item}/running
+    → 不是热点写入，分散在不同 ZNode 上
+```
+
+#### 6.6.5 真正的 ZK 压力来自哪里？
+
+**不是 Cron 触发，而是实例频繁上下线和 Session 超时重建。**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 高压力操作              压力来源              真实风险    │
+├─────────────────────────────────────────────────────────┤
+│ Cron 触发 running 写    每次任务执行时         低         │
+│ Watcher 注册/触发       实例上下线/配置变更    低-中      │
+│ 选举 (LeaderLatch)      实例上下线时           低         │
+│ 分片写入                实例上下线/配置变更    低         │
+├─────────────────────────────────────────────────────────┤
+│ ⚠️ 大量实例频繁上下线   每次上下线触发全流程    中         │
+│ ⚠️ 大量作业同时启动     瞬时大量节点写入        中-高      │
+│ ⚠️ ZK Session 超时      所有临时节点全删+重建  高         │
+└─────────────────────────────────────────────────────────┘
+```
+
+最需要警惕的场景：**ZK Session 过期后所有实例同时重连**——几百个临时节点瞬间全部重建 + 所有 Watcher 同时触发 + 所有作业同时选举 + 所有作业同时分片。这是[前文分析 ZK Session 机制](./)时提到的经典高负载场景。
+
+设置建议：
+
+```
+sessionTimeoutMilliseconds: 60000-120000
+  - 太短：轻微网络抖动就 Session 超时 → 大规模重建 → ZK 压力瞬间飙升
+  - 太长：节点真实宕机后要等太久 → 失效转移延迟大
+
+经验值：60s 适合大多数场景，网络不稳定可调到 120s
 ```
 
 ---
@@ -1128,7 +1598,7 @@ new ZookeeperConfiguration("zk1:2181,zk2:2181,zk3:2181", "elasticjob-namespace")
 ### 核心设计理念回顾
 
 ```
-Elastic-Job 的四个核心设计决策：
+Elastic-Job 的核心设计决策：
 
 1. 去中心化 + ZK 协调
    "没有调度中心，就没有调度中心的单点故障"
@@ -1137,12 +1607,20 @@ Elastic-Job 的四个核心设计决策：
 2. 分片 = 执行权的分布式
    "分片不是数据分片，是谁执行哪部分的分工"
    通过分片将任务拆解为 N 个独立执行单元
+   分片数 ≠ 实例数，两者设计上充分解耦
 
 3. 本地 Quartz + ZK 守卫
    "所有节点同步触发，ZK 分片信息决定谁执行"
    不依赖中心触发，靠 ZK 状态做执行守卫
+   Cron 是绝对壁钟时间，不是相对启动时间
 
-4. 三层一致性保障
+4. 多层缓存，ZooKeeper 无压力
+   TreeCache 缓存 /sharding 子树的全部数据
+   NodeCache 缓存 /config 节点
+   Cron 触发时只有 running 节点的一次创建和一次删除访问 ZK
+   其余操作全部走本地内存
+
+5. 三层一致性保障
    事件驱动(Watcher) → 失效转移(Failover) → 自诊断(Reconciliation)
    实时 → 秒级 → 分钟级，层层兜底
 ```
