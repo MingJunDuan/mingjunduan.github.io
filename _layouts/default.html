@@ -8,6 +8,9 @@
       <div class="topbar-title-row">
         <a href="{{ site.baseurl }}/" class="topbar-title">{{ site.title }}</a>
       </div>
+      {% if site.motto %}
+      <div class="topbar-motto">{{ site.motto }}</div>
+      {% endif %}
       <div class="topbar-sub-row">
         <ul class="topbar-social">
           {% if site.social.email %}
