@@ -32,6 +32,35 @@
     text-align: justify;
   }
 
+  table {
+    border-collapse: collapse;
+    border-spacing: 0;
+    display: block;
+    margin: 0 0 1.5rem;
+    max-width: 100%;
+    overflow-x: auto;
+    width: 100%;
+
+    th,
+    td {
+      border: 1px solid $grey-2;
+      padding: 0.6rem 0.8rem;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: $grey-3;
+      color: $default-shade;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    tr:nth-child(even) td {
+      background: $grey-3;
+    }
+  }
+
   a:hover {
     text-decoration: underline;
   }
