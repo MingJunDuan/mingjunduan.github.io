@@ -63,3 +63,14 @@
 .css .o,
 .css .o + .nt,
 .css .nt + .nt { color: #999; }
+
+// ============================================================
+// Agent trace 事件命名空间着色（可观测性样例）
+// 让事件流轨迹图里不同类别的事件一眼可辨
+// ============================================================
+.evt-turn   { color: #1565c0; font-weight: 600; }  // turn/start, turn/end —— 回合边界（蓝）
+.evt-step   { color: #00897b; font-weight: 600; }  // step/start, step/end —— 步骤边界（青）
+.evt-msg    { color: #7b1fa2; font-weight: 600; }  // user/assistant message —— 消息（紫）
+.evt-chunk  { color: #e65100; font-weight: 600; }  // assistant/chunk —— 流式 token（橙）
+.evt-tool   { color: #c62828; font-weight: 600; }  // tool/call, tool/result —— 工具（红）
+.evt-marker { color: #9e9e9e; font-weight: 600; }  // session/end-seed 等边界标记（灰）

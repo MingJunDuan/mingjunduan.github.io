@@ -80,3 +80,9 @@ pre code {
             user-select: none;
   }
 }
+
+// 手写的 <pre class="highlight"> 代码块（无 Rouge 外层包裹）复用同样的容器样式，
+// 补充横向滚动，保持与 Rouge 高亮块一致的视觉。
+pre.highlight {
+  overflow-x: auto;
+}
