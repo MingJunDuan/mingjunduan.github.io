@@ -394,6 +394,7 @@ public class FirstAgent {
 | **语言/生态** | 桌面应用（VS Code 生态） | Python（主力）/ Java / TypeScript | TypeScript/Node（另有 Python SDK runtime） |
 | **Agent 形态** | 单 Agent（Composer/Agent 模式） | 多 Agent 是一等公民（MsgHub/Pipeline/辩论/路由/交接） | 单 Agent 循环 + 委派（subagent/workflow/Ralph） |
 | **多智能体** | 不直接暴露 | 核心卖点，含分布式 | 有，但以"主子委派"为主，非广播式 |
+| **控制面** | 产品封装，不可改 | 代码级 SDK（Python asyncio / Java Reactor），可细粒度控制 | 配置 + 插件 + 提示词驱动，深度扩展走 TS 插件 |
 | **记忆/状态** | messages 数组 + 压缩 + `.cursorrules` | Workspace + 双层长期记忆 + 状态存储（MySQL/Redis/OSS） | 会话日志（append-only SessionEvent，"模型可见 ⟺ 已记录"） |
 | **可观测** | 界面内较有限的展示 | Studio + OpenTelemetry/LangFuse | 事件流 + 会话查询/回放 |
 | **部署形态** | 本地桌面（+团队计划） | 分布式、多租户、企业级 | 偏本地/单机 CLI，也可远程事件 |
@@ -402,7 +403,12 @@ public class FirstAgent {
 
 ### 6.3 AgentScope vs DeepSeek-Harness：同为"框架/harness"，最需要辨清
 
-这俩最容易被摆在一起比，因为它们都自称"框架/底座"。差异在**哲学**层面最深：
+这俩最容易被摆在一起比，因为它们都自称"框架/底座"。差异从"拿到手怎么用"就开始了，再往深一层才是**哲学**层面的不同：
+
+**（0）最直观的差异：控制面在哪**
+
+- **AgentScope = 代码即编排**：你 `import` 一个 SDK，在 Python/Java 里 `new ReActAgent(...)`、搭 `MsgHub`、写 Pipeline、注册工具——多 Agent 怎么协作、循环怎么转、工具怎么调，全是你的业务代码在说了算，所以能做到**细粒度控制**。
+- **DeepSeek-Harness = 配置 + 插件 + 提示词驱动**：你启动 `dsh`，用 Cordis 配置（`cordis.yml`）组合插件，再通过提示词/JSON-RPC 去驱动它。它的 Python SDK 本质是个"客户端"——官方定位是 *"Python subprocess SDK for driving DeepSeek Harness over JSON-RPC stdio"*，只是拉起 `dsh` 子进程发提示词（`harness.run("Say hi.")`），能控制的只是 `provider / model / max_tokens / cordis` 这类运行时参数，**而不是在代码里定义 Agent、编排多 Agent 协作**。想深度扩展，走的是写 TypeScript 插件这条路；而且它目前还是 *developer preview*（README 原话 *"THERE WILL BE COMPATIBILITY-BREAKING CHANGES"*）。
 
 **（1）第一性原理不同**
 
@@ -424,7 +430,11 @@ public class FirstAgent {
 - AgentScope 是 **Python 优先**（面向 AI 应用/研究/企业业务 Agent），Java/TS 面向企业后端。
 - DeepSeek-Harness 是 **TypeScript/Node 优先**（面向 CLI 编码 Agent 工具链、可插拔工作流），它和你现在正在用的这个 Web/TUI 会话就是同源产物。
 
-一句话总结：**AgentScope 更"面向多智能体应用与业务"，DeepSeek-Harness 更"面向可插拔的 Agent 运行时与工具链"；两者不是替代关系，而是解决"Agent 工程化"这个大类下的不同子问题。**
+**（5）代码风格的成本：细粒度控制的另一面**
+
+AgentScope 的"细粒度控制"不是免费的。Java 2.0 的 API 是**响应式流（Reactor）风格**——`agent.call(...).block()`、`agent.streamEvents(...).doOnNext(...).blockLast()`，连"同步问一句"都得 `.block()` 收尾；Python 侧则是 `asyncio`（`await agent(...)`）。这套风格换来了流式输出、异步子 Agent、可取消（实时打断）这些能力，但对不熟 Reactor 的 Java 团队，`.block()` 套 `.doOnNext()` 的链路**理解和维护成本偏高**。而 DeepSeek-Harness 的"提示词 + 配置"上手更轻，代价是你没有代码级的编排控制。所以这是一组诚实的权衡：**细粒度控制 ⟷ 编排代码复杂度，此消彼长，没有免费午餐。**
+
+一句话总结：**AgentScope 更"面向多智能体应用与业务"，DeepSeek-Harness 更"面向可插拔的 Agent 运行时与工具链"；两者不是替代关系，而是解决"Agent 工程化"这个大类下的不同子问题——前者把控制权交给你的代码，后者把控制权交给插件与配置。**
 
 ### 6.4 AgentScope vs Cursor：框架 vs 产品
 
