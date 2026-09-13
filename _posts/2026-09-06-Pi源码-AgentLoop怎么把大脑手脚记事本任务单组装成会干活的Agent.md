@@ -261,13 +261,27 @@ setDefaultStreamFn(streamSimple);
 
 ---
 
-## 五、第三站 agent-loop.ts（803 行）：发动机本体，四要素在这里转起来
+## 五、第三站 agent-loop.ts（上）：四个入口与主循环
 
-规矩有了、大脑插上了，现在看"工作习惯"本身。这 803 行是全文的主角，分四步拆。
+先说清一个事实：这个文件**不是类，而是纯函数模块**——803 行没有一个 class，全是导出的入口函数加内部辅助函数。"类"是下一章登场的 `Agent`（agent.ts），它只是把这个模块包了一层。文件本身分三层：
 
-### 5.1 事件流：发动机不返回结果，只往外发事件
+```
+第一层 对外入口    agentLoop / agentLoopContinue         → 返回 EventStream（边跑边发事件）
+                  runAgentLoop / runAgentLoopContinue    → 返回 Promise（直接 await 到结束）
+第二层 主循环      runLoop                               → 双层 while，全部核心逻辑
+第三层 工具管线    executeToolCalls → prepare/execute/finalize → 事件发射
+```
 
-先看循环的"输出方式"。`agentLoop` 返回的不是结果，而是一个 `EventStream`（agent-loop.ts:32-55），循环边跑边往外发事件，最后以 `agent_end` 收尾、附上本轮产生的全部新消息。事件全集（types.ts:431-446）画成时序：
+本章讲前两层，工具管线放下一章。
+
+### 5.1 四个入口：流式版与直连版
+
+`agentLoop`（agent-loop.ts:32-55）与 `runAgentLoop`（96-119 行）是同一件事的两种封装：
+
+- `agentLoop` 创建 `EventStream`，把 emit 接到 `stream.push`，然后 **fire-and-forget** 启动循环——结束时 `stream.end(messages)` 收尾。调用方拿到的是流：可以 `for await` 事件、拿结果；
+- `runAgentLoop` 是直连版：调用方自己传 `emit` 回调，返回 `Promise<AgentMessage[]>`。
+
+流里的事件长这样（事件全集在 types.ts:431-446）：
 
 ```
 agent_start
@@ -286,7 +300,35 @@ agent_start
 
 **UI、会话存储、遥测全是旁观者**——它们订阅事件，不参与循环。发动机和仪表盘从此互不阻塞。
 
-### 5.2 双层循环：内层干"工具+插话"，外层管"收工后的追加任务"
+`runAgentLoop` 开头还有个仪式（104-115 行）：把用户 prompt 拼进 context 副本（**不修改调用方传入的 context**），然后发 `agent_start` → `turn_start` → 每条 prompt 的 `message_start/message_end`。注意 `turn_start` 在 prompt 消息**之前**发——所以第一"轮"的定义是"prompt + 第一次 assistant 回答"。
+
+`agentLoopContinue`（65-94 行）是"续跑"入口：不加新消息、从现有上下文继续，主要用于重试。两个前置校验：
+
+```typescript
+if (context.messages.length === 0) throw new Error("Cannot continue: no messages in context");
+if (context.messages[context.messages.length - 1].role === "assistant") {
+    throw new Error("Cannot continue from message role: assistant");
+}
+```
+
+**最后一条消息必须是 user 或 toolResult**——否则下一轮 LLM 调用没有"新的输入"可回应。注释里承认这个约束没法本地完整校验（自定义消息可能在 `convertToLlm` 时才转成 user），所以只能查最后一条的 role。
+
+配套的 `createAgentStream`（146-151 行）只有两行，告诉 `EventStream` 两件事：什么事件算流结束（`agent_end`）、从终结事件提取什么作为结果（`agent_end` 携带的全部新消息）。
+
+### 5.2 主循环的两本账
+
+`runLoop`（156-273 行）开头的状态变量里藏着一个关键设计：
+
+```typescript
+let currentContext = initialContext;   // 工作上下文（会被原地 push）
+let config = initialConfig;            // 循环配置（prepareNextTurn 可以替换它）
+let lastCompletedTurn;                 // 上一轮完整快照
+let pendingMessages = (await config.getSteeringMessages?.()) || [];  // 待注入消息
+```
+
+注意 `newMessages`（参数）和 `currentContext.messages` 是**两本账**：前者只记录"本轮循环新增的消息"，是 `agent_end` 的返回值；后者是发给模型的完整上下文。分账的目的是让调用方知道"这次 run 产生了什么"，而不用 diff 整个上下文。
+
+### 5.3 双层 while：内层干"工具+插话"，外层管"收工后的追加任务"
 
 核心结构（agent-loop.ts:156-177，节选）：
 
@@ -303,7 +345,7 @@ async function runLoop(initialContext, newMessages, initialConfig, signal, emit,
 
         // Inner loop: process tool calls and steering messages
         while (hasMoreToolCalls || pendingMessages.length > 0) {
-            // ...（见下面的①②③④⑤）
+            // ...
         }
 
         // Agent would stop here. Check for follow-up messages.
@@ -339,27 +381,24 @@ async function runLoop(initialContext, newMessages, initialConfig, signal, emit,
 
 **为什么要两层？** 因为"用户中途说的话"有两种语义：干到一半时说的话（steering，插话），和"这活干完了我再补一句"（follow-up，追加）。内层循环负责前者，外层循环负责后者。一个 `while` 干不了这活——插话要**尽快**处理，追加要**干完才**处理，两者的触发时机正好相反。
 
-### 5.3 目标是怎么判定的："什么时候算干完"
+### 5.4 一轮的五个节拍
 
-四要素里的"任务单"，落地在三个地方：
+内层循环每一轮要依次做五件事，轮间顺序藏着设计意图。
 
-1. **模型不再调工具**：assistant 消息里没有 toolCall，且两个队列都空 → 内层循环退出；
-2. **`shouldStopAfterTurn` 钩子**：每轮结束被问一次"这轮干完就停？"（agent-loop.ts:252-255），宿主可以据此实现"上下文快满了，见好就收"的优雅停止；
-3. **`terminate` 信号**：工具结果可以带 `terminate: true`，但有个微妙规则（agent-loop.ts:589-591）：
+**节拍一：prepareNextTurn 快照**（176-190 行，第一轮不跑）。返回的快照可以替换三样东西：
 
 ```typescript
-function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
-    return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
-}
+currentContext = nextTurnSnapshot.context ?? currentContext;   // 整个上下文（压缩后换新的）
+config = {
+    ...config,
+    model: nextTurnSnapshot.model ?? config.model,              // 换模型
+    reasoning: /* thinkingLevel → reasoning 映射 */,
+};
 ```
 
-**整批所有工具都置位才停。** 为什么这么拧？因为工具是并行执行的——一个工具想停、另一个工具正在改文件，如果立刻停，另一半活就丢了。全批置位意味着"这轮的所有手脚都认为可以收工"，才安全地停。
+一个细节：`thinkingLevel: "off"` 被显式映射成 `undefined`——config 里 `reasoning: undefined` 才代表"不指定思考档位"，字符串 `"off"` 是给 UI 的概念。两层语义在边界处做一次翻译。
 
-### 5.4 三个"吃过亏才写得出来"的细节
-
-**细节一：插话只在轮间注入，而且只轮询一次。**
-
-用户在模型回答时打字，消息不会打断正在执行的工具，而是排队等这轮结束。更微妙的是轮间只轮询一次（agent-loop.ts:191-196）：
+**节拍二：补捡一次插话**（194-196 行）：
 
 ```typescript
 // Preparation can be long-running (for example, compaction). Pick up steering
@@ -370,28 +409,151 @@ if (pendingMessages.length === 0) {
 }
 ```
 
-注释里藏着个坑：`prepareNextTurn`（压缩上下文）可能跑很久，期间用户可能又说话了，所以要再捡一次；**但如果第一次已经捡到了，就不能再捡**——否则"一次只注入一条"模式下，一轮会注入两条消息。
+注释里藏着个坑：压缩可能跑很久，期间用户可能又说话了，所以要补捡一次；**但如果循环开头已经捡到了，就不能再捡**——否则"一次只注入一条"模式下，一轮会注入两条消息。
 
-**细节二：大脑"话说到一半被掐断"，整批工具拒绝执行。**
+**节拍三：注入 pending 消息**（201-209 行）：发事件、push 进两本账。时机是"问大脑之前"，所以插话会作为**最新输入**出现在下一轮请求里，而不是插进历史中间。
 
-模型输出撞上 token 上限时，`stopReason` 是 `"length"`。这时候消息里的 tool call 参数可能被截断——更阴险的是，流式 tool call 参数经过"抢救解析"（best-effort JSON salvage parser），**可能解析出"校验通过但内容残缺"的参数**（比如文件路径少了最后一个字符）。执行这种参数就是闯祸。所以（agent-loop.ts:226-233）：
+**节拍四：问大脑 + 错误短路**（212-219 行）：
 
 ```typescript
-const executedToolBatch =
-    message.stopReason === "length"
-        ? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-        : await executeToolCalls(currentContext, message, config, signal, emit);
+const message = await streamAssistantResponse(...);
+if (message.stopReason === "error" || message.stopReason === "aborted") {
+    await emit({ type: "turn_end", message, toolResults: [] });
+    await emit({ type: "agent_end", messages: newMessages });
+    return;
+}
 ```
 
-`failToolCallsFromTruncatedMessage`（agent-loop.ts:379-404）不做任何执行，对每个 tool call 发一条错误结果，措辞直接告诉模型发生了什么：
+这就是第三章"不抛错"契约的消费端：**大脑失败不是异常，是消息上的一个字段**。检查到就补完仪式直接 return——整个主循环零 try/catch。
+
+**节拍五：轮末收尾**（243-257 行）的顺序很讲究：先 `turn_end` → 记快照 → 问 `shouldStopAfterTurn` → 最后才捡 steering。**"宿主喊停"优先于"用户插话"**——喊停了，插话就不捡了。
+
+### 5.5 工具调用怎么处理 + 目标怎么判定
+
+问完大脑，看模型有没有要调工具（222-241 行）：
+
+```typescript
+const toolCalls = message.content.filter((c) => c.type === "toolCall");
+if (toolCalls.length > 0) {
+    const executedToolBatch =
+        message.stopReason === "length"
+            ? await failToolCallsFromTruncatedMessage(toolCalls, emit)
+            : await executeToolCalls(currentContext, message, config, signal, emit);
+    toolResults.push(...executedToolBatch.messages);
+    hasMoreToolCalls = !executedToolBatch.terminate;
+    // 结果逐条 push 进两本账
+}
+```
+
+两个分支：`stopReason === "length"`（输出撞 token 上限）→ 整批拒绝执行；正常 → 走工具管线（下一章讲）。
+
+**为什么"length"要整批拒绝？** 流式 tool call 参数经过"抢救解析"（best-effort JSON salvage parser），**可能解析出"校验通过但内容残缺"的参数**（比如文件路径少了最后一个字符）。执行这种参数就是闯祸。所以 `failToolCallsFromTruncatedMessage`（379-404 行）不做任何执行，对每个 tool call 发一条错误结果，措辞直接告诉模型发生了什么：
 
 > Tool call "xxx" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.
 
 模型收到后会带着完整参数重发。**用"失败-重试"换"执行残缺命令"的安全**。
 
-**细节三：并行干活的顺序语义。**
+最后是"任务单"的落地，三个地方：
 
-`executeToolCallsParallel`（agent-loop.ts:487-561）里，三个阶段刻意用了不同的并发策略：
+1. **模型不再调工具**：没有 toolCall，且两个队列都空 → 内层循环退出；
+2. **`shouldStopAfterTurn` 钩子**：每轮结束被问一次"这轮干完就停？"（252-255 行），宿主可以据此实现"上下文快满了，见好就收"的优雅停止；
+3. **`terminate` 信号**：工具结果可以带 `terminate: true`，但有个微妙规则（589-591 行）：
+
+```typescript
+function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
+    return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+}
+```
+
+**整批所有工具都置位才停。** 因为工具是并行执行的——一个工具想停、另一个工具正在改文件，如果立刻停，另一半活就丢了。全批置位意味着"这轮的所有手脚都认为可以收工"，才安全地停。
+
+---
+
+## 六、第三站 agent-loop.ts（下）：LLM 边界与工具执行管线
+
+### 6.1 streamAssistantResponse：AgentMessage 世界的唯一出口
+
+`streamAssistantResponse`（279-370 行）是内部消息世界到 LLM 消息世界的唯一过境口，五步走完。
+
+**第一步，两次变换**（287-300 行）：
+
+```typescript
+let messages = context.messages;
+if (config.transformContext) {
+    messages = await config.transformContext(messages, signal);   // 裁剪记事本
+}
+const llmMessages = await config.convertToLlm(messages);          // 海关过滤
+const llmContext: Context = {
+    systemPrompt: context.systemPrompt,
+    messages: llmMessages,
+    tools: context.tools,
+};
+```
+
+先裁剪再过滤，**任务单（systemPrompt）和手脚（tools）也在这里随行**——每轮请求都完整携带。
+
+**第二步，每轮重拿钥匙**（302-310 行）：`getApiKey` 每次调用都重新解析——短命 OAuth token 可能在工具执行期间过期，所以每轮问大脑前都重拿，而不是 run 开始时拿一次。
+
+**第三步，调 streamFunction**，拿到事件流。
+
+**第四步，流事件状态机**。核心是 `partialMessage` + `addedPartial` 两个变量的配合：
+
+| 事件 | 动作 |
+|---|---|
+| `start` | 记下 partial，**push 进 context 末尾**，发 `message_start` |
+| `text_delta` 等 8 种 delta | 更新 partial，**原地替换** context 最后一条消息，发 `message_update` |
+| `done` / `error` | 取最终消息：有 partial 就替换、没有就 push，发 `message_end` 并 return |
+
+两个容易漏的边界：
+
+1. **没有 start 直接 done 的流**（某些提供商不发 start）：`addedPartial` 为 false，走"push + 补发 message_start"的路径（352-355 行）——事件序列永远完整；
+2. **`for await` 正常耗尽但没见到 done**（流被异常截断）：循环后面的兜底代码（361-369 行）再调一次 `result()`，同样走"替换或 push + message_end"。
+
+**第五步，"活消息"语义**。delta 事件里这行：
+
+```typescript
+partialMessage = event.partial;
+context.messages[context.messages.length - 1] = partialMessage;
+```
+
+context 里的 assistant 消息**逐帧生长**：任何时刻中断（abort），留下的都是最新 partial，不会出现半条消息。UI 渲染和上下文更新能共用一个事件源，靠的就是这个。
+
+### 6.2 工具执行管线：prepare → execute → finalize
+
+每个工具调用都走同一条管线，返回 `FinalizedToolCallOutcome`（工具调用 + 结果 + 是否错误）：
+
+```
+prepareToolCall（607-675 行）
+  找工具（找不到 → 立即错误结果）
+  → prepareArguments 垫片修参数
+  → validateToolArguments 校验
+  → beforeToolCall 钩子（可 block 拦截，拦截结果还能带 terminate）
+  → abort 检查
+  所有失败路径都返回"立即结果"而不是抛异常
+      ↓
+executePreparedToolCall（677-718 行）
+  真正调 tool.execute()
+  acceptingUpdates 标志：工具 settle 后再调 onUpdate 会被忽略
+  并发 update 事件收进数组，最后 Promise.all 等齐
+      ↓
+finalizeExecutedToolCall（720-765 行）
+  afterToolCall 钩子按字段覆盖结果（content/details/usage/terminate/isError，无深合并）
+  钩子自己抛异常 → 结果整体替换成错误结果
+```
+
+这就是"不抛错"契约在工具侧的落地：**层层吞异常、转错误结果**，所以主循环才敢零 try/catch。
+
+### 6.3 串行 vs 并行：三种并发策略
+
+管线不变，变的只是编排方式。串行版（431-485 行）一个 for 循环把四步走完才轮到下一个；并行版（487-561 行）的技巧在于：prepare 阶段就定性的（被拦截、参数错误）**当场 emit 定值**，能执行的塞**延迟函数（thunk）**进数组，最后：
+
+```typescript
+const orderedFinalizedCalls = await Promise.all(
+    finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
+);
+```
+
+三个阶段刻意用不同的并发策略：
 
 ```
 阶段一  prepare：串行
@@ -403,34 +565,36 @@ const executedToolBatch =
         （执行是"干活"，怎么快怎么来）
 
 阶段三  emit：按大脑安排的原始顺序
-        工具结果消息按 assistant 消息里的 toolCall 顺序
-        一条条记回记事本（agent-loop.ts:547-555）
+        Promise.all 保持数组顺序，toolResult 消息
+        按 assistant 消息里的 toolCall 原顺序一条条记回记事本
         （上下文是"记录"，顺序必须稳定，模型才读得懂）
 ```
 
-三种并发策略对应三个不同的目标：**决策要可预测、干活要快、记录要稳**。
+三种并发策略对应三个目标：**决策要可预测、干活要快、记录要稳**。
 
-### 5.5 流式回答怎么原地更新记事本
+### 6.4 收尾的辅助函数
 
-最后看一眼 `streamAssistantResponse`（agent-loop.ts:279-370）里一个容易忽略的操作：大脑流式输出时，`message_update` 每来一帧，就把记事本里**最后一条消息原地替换**成最新的 partial（agent-loop.ts:333-341）：
+- `shouldTerminateToolBatch`（589-591 行）：`every()` 全批置位才停，见 5.5 节；
+- `createToolResultMessage`（784-798 行）：`content: finalized.result.content ?? []`——未类型化工具（JS 扩展）可能返回没有 content 的结果，这里归一化，防止 `null` 混进会话历史和提供商载荷；
+- `emitToolResultMessage`（800-803 行）：toolResult 进上下文前也走完整的 `message_start/message_end` 仪式——**所有进上下文的消息，无一例外都发事件**，这是 UI/session 状态机一致性的保证。
 
-```typescript
-if (partialMessage) {
-    partialMessage = event.partial;
-    context.messages[context.messages.length - 1] = partialMessage;
-    await emit({ type: "message_update", ... });
-}
-```
+### 6.5 这个文件的三条铁律
 
-记事本里的 assistant 消息是"活的"，随 token 逐帧生长，直到 `done` 才定型。这保证了**任何时刻去看上下文，看到的都是最新状态**——中途 abort 也不会留下半条消息。
+回头看，803 行的每一段都在服务三个约束：
+
+1. **契约式不抛错**——prepare/execute/finalize 层层吞异常转错误结果，主循环零 try/catch；
+2. **事件仪式完整**——任何进上下文的消息（prompt、assistant、toolResult）都发成对事件，任何退出路径都补完 turn_end/agent_end；
+3. **顺序语义清晰**——决策串行、执行并发、记录按源顺序；插话轮间注入、追加收工前检查。
+
+这些约束单独看都不难，难的是 803 行里**没有一处违反**。这就是"发动机"和"能跑起来的循环"的区别。
 
 ---
 
-## 六、第四站 agent.ts（592 行）：操作台——状态、队列、订阅
+## 七、第四站 agent.ts（592 行）：操作台——状态、队列、订阅
 
 发动机是纯函数：每次调用给它 context 和 config，它跑完发事件。**但"现在干到哪了"得有人记着**——这就是 `Agent` 类（agent.ts:173），它把无状态循环包装成一个可交互对象。四件事值得看。
 
-### 6.1 记事本的当前态，setter 偷偷复制
+### 7.1 记事本的当前态，setter 偷偷复制
 
 ```typescript
 // agent.ts:68-95（节选）
@@ -449,7 +613,7 @@ function createMutableAgentState(initialState?) {
 
 外部代码拿到 `state` 引用后**改不了内部数组**——setter 强制复制。防止"UI 那边顺手 push 一条消息，这边上下文就乱了"这类共享可变状态的经典事故。
 
-### 6.2 两个队列：插话便签 vs 追加任务
+### 7.2 两个队列：插话便签 vs 追加任务
 
 `PendingMessageQueue`（agent.ts:125-159）的核心是 `drain()`，支持两种模式：
 
@@ -467,7 +631,7 @@ drain(): AgentMessage[] {
 }
 ```
 
-对应上一节的 steering / followUp 两个队列（`Agent` 构造时各建一个，agent.ts:231-232）：
+对应 5.3 节双层循环里的 steering / followUp 两个队列（`Agent` 构造时各建一个，agent.ts:231-232）：
 
 ```
  steering（干活中插话的便签条）：
@@ -483,7 +647,7 @@ drain(): AgentMessage[] {
                    （默认值——插话一条一条来，模型消化得过来）
 ```
 
-### 6.3 单飞保护：连按回车不崩、不打断
+### 7.3 单飞保护：连按回车不崩、不打断
 
 ```typescript
 // agent.ts:348-357（节选）
@@ -499,7 +663,7 @@ async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageConten
 
 一次只允许一个 run 在跑（`activeRun`，agent.ts:204）。用户连按回车不会打断正在跑的循环，而是得到一句提示：**用 `steer()` 排队**。这就是整套设计的哲学——**排队优先于中断**。abort 只留给显式信号（Ctrl+C），普通交互全部转成队列语义。
 
-### 6.4 订阅者参与结算：UI 渲染完了才算真收工
+### 7.4 订阅者参与结算：UI 渲染完了才算真收工
 
 ```typescript
 // agent.ts:328-330
@@ -510,7 +674,7 @@ waitForIdle(): Promise<void> {
 
 注意注释里的约定（agent.ts:247-249）：`agent_end` 是最后一个事件，**但 agent 要等所有订阅者处理完 `agent_end` 之后才算 idle**。也就是说：TUI 把最后一帧渲染完、session 把最后一条消息落盘，`waitForIdle()` 才 resolve。**订阅者不是旁观的日志，而是生命周期的一部分**——它们阻塞式地参与结算。
 
-### 6.5 失败路径：发动机崩了，也要走完仪式
+### 7.5 失败路径：发动机崩了，也要走完仪式
 
 ```typescript
 // agent.ts:511-527（节选）
@@ -534,7 +698,7 @@ private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> 
 
 ---
 
-## 七、记忆的完整故事：记事本满了怎么办
+## 八、记忆的完整故事：记事本满了怎么办
 
 前面一直说"上下文即记忆"（对照 [《企业级记忆知识库》](/2026-09-01/企业级记忆知识库-短期上下文与四层记忆的RAG向量检索实现) 里的分层记忆，那篇讲企业知识库的四层，这篇看单个 agent 会话内的三层）。但记事本无限写下去会爆——pi 的答案是分三层：
 
@@ -583,7 +747,7 @@ this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 
 ---
 
-## 八、总结：回到四要素，一张总图
+## 九、总结：回到四要素，一张总图
 
 把全文收束成一张对照大图：
 
@@ -603,7 +767,7 @@ this.agent.prepareNextTurnWithContext = async (turn, signal) => {
           shouldStopAfterTurn      优雅收工
           terminate 全批置位        并行下安全停止
 ──────────────────────────────────────────────────────────
-发动机 →  agent-loop.ts (803行)    双层 while + 事件流
+发动机 →  agent-loop.ts (803行)    入口/主循环/工具管线三层
 操作台 →  agent.ts (592行)         队列/单飞/订阅结算
 ```
 
